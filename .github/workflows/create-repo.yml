@@ -1,0 +1,88 @@
+name: Create repository
+
+# requests/ 폴더에 새 .json 파일이 푸시되면 그 내용대로 저장소를 만든다.
+# 파일 예시: {"name": "kart", "visibility": "private", "description": "카트 게임"}
+# Actions 탭에서 직접 실행(Run workflow)해도 된다.
+
+on:
+  push:
+    paths:
+      - 'requests/*.json'
+  workflow_dispatch:
+    inputs:
+      name:
+        description: '새 저장소 이름'
+        required: true
+      visibility:
+        description: 'private 또는 public'
+        required: true
+        default: 'private'
+      description:
+        description: '설명 (선택)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  create:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create repositories
+        env:
+          GH_TOKEN: ${{ secrets.REPO_CREATOR_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+          IN_NAME: ${{ inputs.name }}
+          IN_VIS: ${{ inputs.visibility }}
+          IN_DESC: ${{ inputs.description }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error::REPO_CREATOR_TOKEN secret이 없습니다."
+            exit 1
+          fi
+
+          owner=$(gh api user --jq .login)
+          failed=0
+
+          create() {
+            local name="$1" vis="$2" desc="$3"
+            if ! [[ "$name" =~ ^[A-Za-z0-9._-]{1,100}$ ]]; then
+              echo "::error::잘못된 저장소 이름: $name"; failed=1; return
+            fi
+            case "$vis" in public|private) ;; *)
+              echo "::error::visibility는 public 또는 private: $vis"; failed=1; return ;;
+            esac
+            if gh repo view "$owner/$name" >/dev/null 2>&1; then
+              echo "::warning::$owner/$name 은(는) 이미 있어서 건너뜀"; return
+            fi
+            gh repo create "$owner/$name" "--$vis" --description "$desc" --add-readme
+            echo "### 생성됨: https://github.com/$owner/$name" >> "$GITHUB_STEP_SUMMARY"
+          }
+
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            create "$IN_NAME" "$IN_VIS" "$IN_DESC"
+          else
+            if [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
+              files=$(git ls-files 'requests/*.json')
+            else
+              files=$(git diff --diff-filter=A --name-only "$BEFORE" "$AFTER" -- 'requests/*.json')
+            fi
+            for f in $files; do
+              echo "처리: $f"
+              name=$(jq -r '.name // empty' "$f")
+              vis=$(jq -r '.visibility // "private"' "$f")
+              desc=$(jq -r '.description // ""' "$f")
+              create "$name" "$vis" "$desc"
+            done
+          fi
+
+          exit $failed
